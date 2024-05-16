@@ -1,104 +1,168 @@
 /*
- *  Little project to turn on/off a Optoma DX733 projector via serial port
- *  Didn't get the original remote when I bought it. Now using a spare
- *  button on the remote of my X5 Xnano Android TV box
- *  
- *  Compile with stm32duino
- *  * Board Generic STM32F0 Series
- *  * Optimize: Smallest with LTO
- *  * Use patched IRremote library
- *  
- *  IR-Receiver <-> STM32F030F4 <-> MAX3232 <-> DX733
- */
+    Little project to turn on/off a Optoma DX733 projector via serial port
+    Didn't get the original remote when I bought it. Now using a spare
+    button on the remote of my X5 Xnano Android TV box
+
+    IR-Receiver <-> ESP32-C3 <-> MAX3232 <-> DX733
+*/
+
+int RECV_PIN = 2;
+int LED_PIN = 12;
+int RX_PIN = 10;
+int TX_PIN = 3;
+
+const char *ssid = "...";
+const char *password = "...";
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
 
 #include <IRremote.h>
+#include "beamer.h"
+#include "ircodes.h"
 
+Beamer beamer(Serial1);
+WebServer server(80);
 
-int RECV_PIN = PA9;
+#include <ArduinoJson.h>
+#include <FS.h>   // Include the SPIFFS library
+#include "SPIFFS.h"
 
-IRrecv irrecv(RECV_PIN);
+bool beamer_on = false;
 
-decode_results results;
+uint32_t reverse(uint32_t value) {
+  uint32_t ret = 0;
 
-// IR codes of 4X2 HDMI matrix
-#define IR_HDMI_POWER 0xFF28D7
-#define IR_HDMI_A_POWER 0xFFB04F
-#define IR_HDMI_A_1 0xFF9867
-#define IR_HDMI_A_2 0xFFA857
-#define IR_HDMI_A_3 0xFF0AF5
-#define IR_HDMI_A_4 0xFF52AD
-#define IR_HDMI_B_POWER 0xFF40BF
-#define IR_HDMI_B_1 0xFF18E7
-#define IR_HDMI_B_2 0xFF8A75
-#define IR_HDMI_B_3 0xFFCA35
-#define IR_HDMI_B_4 0xFFA25D
-
-// IR codes of ???
-#define IR_VOLUME_POWER 0x5CB04F
-#define IR_VOLUME_PLUS 0x5CA857
-#define IR_VOLUME_MINUS 0x5C906F
-
-// IR codes of TV control section of the X5 Xnano Android box
-// #define IR_X5_TV_SET 0x
-#define IR_X5_TV_AV 0x807F2FD0
-#define IR_X5_TV_POWER 0x807F8F70
-#define IR_X5_TV_VOLP 0x807F4FB0
-#define IR_X5_TV_VOLM 0x807FCF30
-
-#define IR_REPEAT  0xFFFFFFFF
-
-
-#define TIMER_BLINK  TIM14
-static stimer_t TimHandle;
-
-extern void IRTimer();
-
-void callback(stimer_t *htim){
-  UNUSED(htim);
-  IRTimer();
+  for (int x = 0; x < 32; x++) {
+    ret = ret << 1;
+    ret |= value & 0x01;
+    value = value >> 1;
+  }
+  return ret;
 }
 
 void setup() {
- Serial.begin(9600);
- pinMode(LED_BUILTIN, OUTPUT);
- //delay(5000);
- //Serial.println("ID00IR101");
- irrecv.enableIRIn();
- 
- TimHandle.timer = TIMER_BLINK;
- //TimerHandleInit(&TimHandle, 10000 - 1, ((uint32_t)(getTimerClkFreq(TIMER_BLINK) / (1000000)) - 1));
- TimerHandleInit(&TimHandle, 50 - 1, ((uint32_t)(getTimerClkFreq(TIMER_BLINK) / (1000000)) - 1));
- attachIntHandle(&TimHandle, callback);
- 
+  Serial.begin(115200);
+
+  Serial1.setPins(RX_PIN, TX_PIN);
+  Serial1.begin(9600);
+
+  pinMode(LED_PIN, OUTPUT);
+
+  IrReceiver.begin(RECV_PIN, false);
+
+  SPIFFS.begin();
+
+  WiFi.mode ( WIFI_STA );
+
+  WiFi.disconnect();
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++)
+  {
+    Serial.println(WiFi.SSID(i));
+  }
+
+  WiFi.begin ( ssid, password );
+  Serial.println ( "" );
+
+  // Wait for connection
+  while ( WiFi.status() != WL_CONNECTED ) {
+    delay ( 500 );
+    Serial.print ( "." );
+  }
+
+  Serial.println ( "" );
+  Serial.print ( "Connected to " );
+  Serial.println ( ssid );
+  Serial.print ( "IP address: " );
+  Serial.println ( WiFi.localIP() );
+
+  server.onNotFound([]() {                              // If the client requests any URI
+    if (!handleFileRead(server.uri()))                  // send it if it exists
+      server.send(404, "text/plain", "404: Not Found"); // otherwise, respond with a 404 (Not Found) error
+  });
+  server.on("/api", HTTP_POST, handleApiCall);
+  server.begin();
+  Serial.println("HTTP server started");
 }
+
+bool handleFileRead(String path) { // send the right file to the client (if it exists)
+  Serial.println("host: " + server.hostHeader());
+  Serial.println("handleFileRead: " + path);
+  if (path.endsWith("/")) path += "index.html";         // If a folder is requested, send the index file
+  String contentType = getContentType(path);            // Get the MIME type
+  if (SPIFFS.exists(path)) {                            // If the file exists
+    File file = SPIFFS.open(path, "r");                 // Open it
+    server.streamFile(file, contentType); // And send it to the client
+    file.close();                                       // Then close the file again
+    return true;
+  }
+  Serial.println("\tFile Not Found");
+  return false;                                         // If the file doesn't exist, return false
+}
+
+void handleApiCall() {
+  for (int c = 0; c < server.args(); c++) {
+    Serial.println(server.argName(c));
+  }
+
+  String command = "";
+  if (server.hasArg("command")) {
+    command = server.arg("command");
+    Serial.print("Command: ");
+    Serial.println(command);
+  }
+
+
+  if (command == "powerOn") {
+    beamer_on = true;
+    beamer.powerOn();
+  } else if (command == "powerOff") {
+    beamer_on = false;
+    beamer.powerOff();
+  }
+  digitalWrite(LED_PIN, beamer_on);
+
+  server.send(200, "application/json", "{\"result\":\"OK\"}");
+}
+
+String getContentType(String filename) { // convert the file extension to the MIME type
+  if (filename.endsWith(".html")) return "text/html";
+  else if (filename.endsWith(".css")) return "text/css";
+  else if (filename.endsWith(".js")) return "application/javascript";
+  else if (filename.endsWith(".ico")) return "image/x-icon";
+  else if (filename.endsWith(".svg")) return "image/svg+xml";
+  return "text/plain";
+}
+
 
 uint32_t lastbutton = -1;
 uint32_t lastseen = 0;
 int repeated = 0;
 
-bool beamer_on = false;
-
-bool  processbutton(uint32_t button, bool repeat){
-  if(!repeat && button == IR_X5_TV_POWER){
+bool  processbutton(uint32_t button, bool repeat) {
+  if (!repeat && button == reverse(IR_X5_TV_POWER)) {
     beamer_on = !beamer_on;
-    if(beamer_on){
-      Serial.println("ID00IR101");
+    if (beamer_on) {
+      beamer.powerOn();
     } else {
-      Serial.println("ID00IR100");
+      beamer.powerOff();
     }
-    digitalWrite(LED_BUILTIN, beamer_on);
+    digitalWrite(LED_PIN, beamer_on);
   }
   return false;
 }
 
 void loop() {
-  if (irrecv.decode(&results)) {
-    uint32_t button = results.value;
-    //Serial.println(button, HEX);
-    if (button == IR_REPEAT){
-      if (millis() - 1000 < lastseen){
+  server.handleClient();
+  if (IrReceiver.decode()) {
+    uint32_t button = IrReceiver.decodedIRData.decodedRawData;
+    Serial.println(button, HEX);
+    if (button == IR_REPEAT) {
+      if (millis() - 1000 < lastseen) {
         repeated++;
-        if (repeated > 5){
+        if (repeated > 5) {
           repeated = 0;
           processbutton(lastbutton, true);
         }
@@ -106,10 +170,10 @@ void loop() {
     } else {
       lastbutton = button;
       repeated = 0;
-      bool setlastmode = processbutton(button, false);
+      processbutton(button, false);
     }
 
     lastseen = millis();
-    irrecv.resume(); // Receive the next value
+    IrReceiver.resume();
   }
 }
