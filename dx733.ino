@@ -19,17 +19,23 @@ const char *password = "...";
 #include <WebServer.h>
 
 #include <IRremote.h>
-#include "beamer.h"
 #include "ircodes.h"
 
-Beamer beamer(Serial1);
+#if 0
+#include "optoma.h"
+Optoma projector(Serial1);
+#else
+#include "acer.h"
+Acer projector(Serial1);
+#endif
+
 WebServer server(80);
 
 #include <ArduinoJson.h>
-#include <FS.h>   // Include the SPIFFS library
+#include <FS.h>  // Include the SPIFFS library
 #include "SPIFFS.h"
 
-bool beamer_on = false;
+bool projector_on = false;
 
 uint32_t reverse(uint32_t value) {
   uint32_t ret = 0;
@@ -47,6 +53,7 @@ void setup() {
 
   Serial1.setPins(RX_PIN, TX_PIN);
   Serial1.begin(9600);
+  projector.begin();
 
   pinMode(LED_PIN, OUTPUT);
 
@@ -54,52 +61,51 @@ void setup() {
 
   SPIFFS.begin();
 
-  WiFi.mode ( WIFI_STA );
+  WiFi.mode(WIFI_STA);
 
   WiFi.disconnect();
   int n = WiFi.scanNetworks();
-  for (int i = 0; i < n; i++)
-  {
+  for (int i = 0; i < n; i++) {
     Serial.println(WiFi.SSID(i));
   }
 
-  WiFi.begin ( ssid, password );
-  Serial.println ( "" );
+  WiFi.begin(ssid, password);
+  Serial.println("");
 
   // Wait for connection
-  while ( WiFi.status() != WL_CONNECTED ) {
-    delay ( 500 );
-    Serial.print ( "." );
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
 
-  Serial.println ( "" );
-  Serial.print ( "Connected to " );
-  Serial.println ( ssid );
-  Serial.print ( "IP address: " );
-  Serial.println ( WiFi.localIP() );
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
 
-  server.onNotFound([]() {                              // If the client requests any URI
-    if (!handleFileRead(server.uri()))                  // send it if it exists
-      server.send(404, "text/plain", "404: Not Found"); // otherwise, respond with a 404 (Not Found) error
+  server.onNotFound([]() {                               // If the client requests any URI
+    if (!handleFileRead(server.uri()))                   // send it if it exists
+      server.send(404, "text/plain", "404: Not Found");  // otherwise, respond with a 404 (Not Found) error
   });
   server.on("/api", HTTP_POST, handleApiCall);
   server.begin();
   Serial.println("HTTP server started");
 }
 
-bool handleFileRead(String path) { // send the right file to the client (if it exists)
+bool handleFileRead(String path) {  // send the right file to the client (if it exists)
   Serial.println("host: " + server.hostHeader());
   Serial.println("handleFileRead: " + path);
-  if (path.endsWith("/")) path += "index.html";         // If a folder is requested, send the index file
-  String contentType = getContentType(path);            // Get the MIME type
-  if (SPIFFS.exists(path)) {                            // If the file exists
-    File file = SPIFFS.open(path, "r");                 // Open it
-    server.streamFile(file, contentType); // And send it to the client
-    file.close();                                       // Then close the file again
+  if (path.endsWith("/")) path += "index.html";  // If a folder is requested, send the index file
+  String contentType = getContentType(path);     // Get the MIME type
+  if (SPIFFS.exists(path)) {                     // If the file exists
+    File file = SPIFFS.open(path, "r");          // Open it
+    server.streamFile(file, contentType);        // And send it to the client
+    file.close();                                // Then close the file again
     return true;
   }
   Serial.println("\tFile Not Found");
-  return false;                                         // If the file doesn't exist, return false
+  return false;  // If the file doesn't exist, return false
 }
 
 void handleApiCall() {
@@ -116,18 +122,18 @@ void handleApiCall() {
 
 
   if (command == "powerOn") {
-    beamer_on = true;
-    beamer.powerOn();
+    projector_on = true;
+    projector.powerOn();
   } else if (command == "powerOff") {
-    beamer_on = false;
-    beamer.powerOff();
+    projector_on = false;
+    projector.powerOff();
   }
-  digitalWrite(LED_PIN, beamer_on);
+  digitalWrite(LED_PIN, projector_on);
 
   server.send(200, "application/json", "{\"result\":\"OK\"}");
 }
 
-String getContentType(String filename) { // convert the file extension to the MIME type
+String getContentType(String filename) {  // convert the file extension to the MIME type
   if (filename.endsWith(".html")) return "text/html";
   else if (filename.endsWith(".css")) return "text/css";
   else if (filename.endsWith(".js")) return "application/javascript";
@@ -141,15 +147,15 @@ uint32_t lastbutton = -1;
 uint32_t lastseen = 0;
 int repeated = 0;
 
-bool  processbutton(uint32_t button, bool repeat) {
+bool processbutton(uint32_t button, bool repeat) {
   if (!repeat && button == reverse(IR_X5_TV_POWER)) {
-    beamer_on = !beamer_on;
-    if (beamer_on) {
-      beamer.powerOn();
+    projector_on = !projector_on;
+    if (projector_on) {
+      projector.powerOn();
     } else {
-      beamer.powerOff();
+      projector.powerOff();
     }
-    digitalWrite(LED_PIN, beamer_on);
+    digitalWrite(LED_PIN, projector_on);
   }
   return false;
 }
@@ -175,5 +181,10 @@ void loop() {
 
     lastseen = millis();
     IrReceiver.resume();
+  }
+
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    Serial.write(c);
   }
 }
